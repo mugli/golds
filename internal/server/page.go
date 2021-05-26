@@ -81,6 +81,7 @@ const (
 	SourceReadingStyle_plain     = "plain"
 	SourceReadingStyle_highlight = "highlight"
 	SourceReadingStyle_rich      = "rich"
+	SourceReadingStyle_literate  = "literate"
 	SourceReadingStyle_external  = "external" // auto detect project hosting URL
 )
 

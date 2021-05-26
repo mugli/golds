@@ -177,6 +177,7 @@ func Run() {
 		}
 	case srcReadingStyle == server.SourceReadingStyle_highlight:
 	case srcReadingStyle == server.SourceReadingStyle_rich:
+	case srcReadingStyle == server.SourceReadingStyle_literate:
 	case strings.HasPrefix(srcReadingStyle, server.SourceReadingStyle_external):
 	}
 	if srcReadingStyle != server.SourceReadingStyle_plain && *plainsrc {

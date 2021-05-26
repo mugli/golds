@@ -176,6 +176,7 @@ func (ds *docServer) initSettings(lang string) {
 	}
 
 	registerTheme(&theme.Light{})
+	registerTheme(&theme.LightLiterate{})
 
 	registerTranslation(&translation.English{})
 	registerTranslation(&translation.Chinese{})

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"go101.org/golds/code"
 )
@@ -79,7 +80,11 @@ func (ds *docServer) sourceCodePage(w http.ResponseWriter, r *http.Request, pkgP
 			return
 		}
 
-		data = ds.buildSourceCodePage(w, result)
+		if sourceReadingStyle == SourceReadingStyle_literate {
+			data = ds.buildLiterateSourceCodePage(w, result)
+		} else {
+			data = ds.buildSourceCodePage(w, result)
+		}
 		ds.cachePage(pageKey, data)
 	}
 	w.Write(data)
@@ -191,12 +196,217 @@ func (ds *docServer) buildSourceCodePage(w http.ResponseWriter, result *SourceFi
 	return page.Done(w)
 }
 
+func (ds *docServer) buildLiterateSourceCodePage(w http.ResponseWriter, result *SourceFileAnalyzeResult) []byte {
+	page := NewHtmlPage(goldsVersion, ds.currentTranslation.Text_SourceCode(result.PkgPath, result.BareFilename), ds.themeByName("lightLiterate"), ds.currentTranslation, createPagePathInfo2b(ResTypeSource, result.PkgPath, "/", result.BareFilename))
+
+	realFilePath := result.OriginalPath
+	if result.GeneratedPath != "" {
+		realFilePath = result.GeneratedPath
+	}
+
+	if genDocsMode {
+		fmt.Fprintf(page, `
+<pre id="header"><code><span class="title">%s</span>
+	%s`,
+			page.Translation().Text_SourceFilePath(),
+			result.BareFilename,
+		)
+	} else {
+		fmt.Fprintf(page, `
+<pre id="header"><code><span class="title">%s</span>
+	%s`,
+			page.Translation().Text_SourceFilePath(),
+			realFilePath,
+		)
+
+		if result.OriginalPath != "" && result.OriginalPath != realFilePath {
+			fmt.Fprintf(page, `
+
+<span class="title">%s</span>
+	%s`,
+				page.Translation().Text_GeneratedFrom(),
+				result.OriginalPath,
+			)
+		}
+	}
+
+	fmt.Fprintf(page, `
+
+<span class="title">%s</span>
+	<a href="%s">%s</a>
+</code></pre>
+`,
+		page.Translation().Text_BelongingPackage(),
+		buildPageHref(page.PathInfo, createPagePathInfo1(ResTypePackage, result.PkgPath), nil, ""),
+		result.PkgPath,
+	)
+
+	if result.NumRatios > 0 || result.NumImportRatios > 0 {
+		page.WriteString("<style>")
+		page.WriteString("input[type=radio] {display: none;}\n")
+		for i := int32(0); i < result.NumRatios; i++ {
+			fmt.Fprintf(page, `input[id=r%[1]d]:checked ~pre label[for=r%[1]d]`, i)
+			if i < result.NumRatios-1 {
+				page.WriteByte(',')
+			}
+			page.WriteByte('\n')
+		}
+		page.WriteString("{background: #226; color: #ff8;}\n")
+		for i := int32(0); i < result.NumImportRatios; i++ {
+			fmt.Fprintf(page, `input[id=i%[1]d]:checked ~pre .i%[1]d`, i)
+			if i < result.NumImportRatios-1 {
+				page.WriteByte(',')
+			}
+			page.WriteByte('\n')
+		}
+		page.WriteString("{background: brown; color: #eed;}\n")
+		page.WriteString("</style>")
+
+		for i := int32(0); i < result.NumRatios; i++ {
+			fmt.Fprintf(page, `<input id="r%d" type="radio" name="g"/>`, i)
+			page.WriteByte('\n')
+		}
+		for i := int32(0); i < result.NumImportRatios; i++ {
+			fmt.Fprintf(page, `<input id="i%d" type="radio" name="i"/>`, i)
+			page.WriteByte('\n')
+		}
+	}
+
+	page.WriteString(`<div id="container">`)
+
+	lp := &result.Lines
+	sections := lp.ProcessSections()
+	for _, section := range sections {
+		fmt.Fprintln(page, `<div class="section">`)
+		fmt.Fprintln(page, `<div class="doc">`)
+		for _, line := range section.commentLines {
+			fmt.Fprintf(page, `%s`, renderComment(line))
+		}
+		fmt.Fprintln(page, `</div>`)
+		fmt.Fprint(page, `<div class="code"><pre><code>`)
+		for _, line := range section.codeLines {
+			fmt.Fprintf(page, "%s\n", line)
+		}
+		fmt.Fprint(page, `</code></pre></div>`)
+		fmt.Fprintln(page, `</div>`)
+	}
+	page.WriteString(`
+</div>`)
+
+	return page.Done(w)
+}
+
+func renderComment(input string) string {
+	result := strings.TrimSpace(input)
+
+	return result
+}
+
+type lineMarkers struct {
+	isSectionBlockStart bool
+	isSectionBlockEnd   bool
+	isCodeBlockStart    bool
+	isCodeBlockEnd      bool
+}
+
+type line struct {
+	content             string
+	isLineComment		bool
+	lineMarkers 		lineMarkers
+}
+
+func (l line) String() string {
+	return fmt.Sprintf(`%s`, l.content)
+}
+
+type lines []line
+
+func (lp *lines) next(curIndex int) *line {
+	llen := len(*lp)
+
+	if curIndex < 0 {
+		return nil
+	} else if curIndex >= llen - 1 {
+		return nil
+	}
+
+	return &(*lp)[curIndex + 1]
+}
+
+func (lp *lines) markCodeBlocks() {
+	l := *lp
+	llen := len(l)
+	codeBlockStarted := false
+
+	for curIndex := 0; curIndex < llen; curIndex++ {
+		cur := &l[curIndex]
+		next := lp.next(curIndex)
+
+		if !cur.isLineComment {
+			if !codeBlockStarted {
+				cur.lineMarkers.isCodeBlockStart = true
+			}
+			codeBlockStarted = true
+		}
+
+		if next == nil || next.isLineComment {
+			if codeBlockStarted {
+				cur.lineMarkers.isCodeBlockEnd = true
+			}
+			codeBlockStarted = false
+		}
+	}
+}
+
+func (lp *lines) ProcessSections() []section {
+	result := make([]section, 0)
+	lp.markCodeBlocks()
+
+	l := *lp
+	llen := len(l)
+
+	sectionBlockStarted := false
+	var curSection section
+	for curIndex := 0; curIndex < llen; curIndex++ {
+		cur := &l[curIndex]
+		next := lp.next(curIndex)
+
+		if !sectionBlockStarted {
+			cur.lineMarkers.isSectionBlockStart = true
+			sectionBlockStarted = true
+
+			curSection = section{}
+		} else {
+			if cur.lineMarkers.isCodeBlockEnd || next == nil {
+				cur.lineMarkers.isSectionBlockEnd = true
+				sectionBlockStarted = false
+
+				result = append(result, curSection)
+			}
+		}
+
+		if cur.isLineComment {
+			curSection.commentLines = append(curSection.commentLines, cur.content)
+		} else {
+			curSection.codeLines = append(curSection.codeLines, cur.content)
+		}
+	}
+
+
+	return result
+}
+
+type section struct {
+	commentLines []string
+	codeLines []string
+}
+
 type SourceFileAnalyzeResult struct {
 	PkgPath         string
 	BareFilename    string
 	OriginalPath    string
 	GeneratedPath   string
-	Lines           []string
+	Lines           lines
 	NumRatios       int32 // not including import idendifiers
 	NumImportRatios int32
 	DocStartLine    int
@@ -518,6 +728,8 @@ type astVisitor struct {
 	topLevelStructTypeSpec      *ast.TypeSpec
 
 	pkgPath2RatioID map[string]int32
+
+	isLineComment			bool
 }
 
 type astFunctionInfo struct {
@@ -688,9 +900,25 @@ func (v *astVisitor) tryToHandleSomeSpecialNodes(beforeNode ast.Node) {
 //	}
 //}
 
+func stripCommentMarker(data []byte) []byte {
+	comment := string(data)
+	// Fixme: handle directives
+	comment = strings.Replace(comment, "//", "", 1)
+	comment = strings.Replace(comment, "/*", "", 1)
+	comment = strings.Replace(comment, "*/", "", 1)
+	return []byte(comment)
+}
+
 func (v *astVisitor) writeEscapedHTML(data []byte, class string) {
 	if len(data) == 0 {
 		return
+	}
+	if class == "comment" {
+		// FixMe: it is a hack to detect if the whole line is a comment
+		if strings.TrimSpace(v.lineBuilder.String()) == "" {
+			v.isLineComment = true
+			data = stripCommentMarker(data)
+		}
 	}
 	if class != "" {
 		fmt.Fprintf(&v.lineBuilder, `<span class="%s">`, class)
@@ -736,9 +964,15 @@ func (v *astVisitor) buildConfirmedLines(toLine int, class string) {
 	}
 }
 
+//
 func (v *astVisitor) buildLine() {
-	v.result.Lines = append(v.result.Lines, v.lineBuilder.String())
+	line := line{
+		content: v.lineBuilder.String(),
+		isLineComment: v.isLineComment,
+	}
+	v.result.Lines = append(v.result.Lines, line)
 	v.lineBuilder.Reset()
+	v.isLineComment = false
 }
 
 func (v *astVisitor) buildText(litStart, litEnd token.Position, class, link, labelForId string) {
@@ -1296,7 +1530,7 @@ func (v *astVisitor) handleToken(pos token.Pos, token, class, link string) {
 }
 
 func (v *astVisitor) handleIdent(ident *ast.Ident) {
-	if sourceReadingStyle != SourceReadingStyle_rich {
+	if !(sourceReadingStyle == SourceReadingStyle_rich || sourceReadingStyle == SourceReadingStyle_literate) {
 		return
 	}
 
@@ -1791,7 +2025,7 @@ func (ds *docServer) analyzeSoureCode(pkgPath, bareFilename string) (*SourceFile
 			BareFilename:  bareFilename,
 			OriginalPath:  fileInfo.OriginalFile,
 			GeneratedPath: generatedFilePath,
-			Lines:         make([]string, 0, lineCount),
+			Lines:         make([]line, 0, lineCount),
 			DocStartLine:  docStartLine,
 			DocEndLine:    docEndLine,
 		}
@@ -1807,7 +2041,10 @@ func (ds *docServer) analyzeSoureCode(pkgPath, bareFilename string) (*SourceFile
 				k--
 			}
 			WriteHtmlEscapedBytes(&buf, data[:k])
-			result.Lines = append(result.Lines, buf.String())
+			line := line{
+				content: buf.String(),
+			}
+			result.Lines = append(result.Lines, line)
 			buf.Reset()
 
 			if i < 0 {
@@ -1853,7 +2090,7 @@ func (ds *docServer) analyzeSoureCode(pkgPath, bareFilename string) (*SourceFile
 				BareFilename:  bareFilename,
 				OriginalPath:  fileInfo.OriginalFile,
 				GeneratedPath: generatedFilePath,
-				Lines:         make([]string, 0, file.LineCount()),
+				Lines:         make([]line, 0, file.LineCount()),
 				DocStartLine:  docStartLine,
 				DocEndLine:    docEndLine,
 			},
